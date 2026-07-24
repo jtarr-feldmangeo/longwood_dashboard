@@ -170,6 +170,36 @@ require([
   }
 
   // ---- 1. Sign in ----
+  //
+  // Selecting a different point on the map changes the Embed widget's URL
+  // (?station=X), which reloads this page from scratch -- so without
+  // manual persistence, IdentityManager forgets the sign-in every single
+  // time and re-prompts. Esri's IdentityManager does NOT persist across
+  // page loads by default; the documented pattern is to serialize its
+  // state (toJSON()) into localStorage after signing in, and restore it
+  // (initialize()) before the next sign-in check. This means the user
+  // still sees one popup the very first time, but subsequent point
+  // selections reuse that same signed-in session silently.
+  var STORAGE_KEY = "defmon_chart_identity";
+
+  try {
+    var savedIdentity = localStorage.getItem(STORAGE_KEY);
+    if (savedIdentity) {
+      esriId.initialize(JSON.parse(savedIdentity));
+    }
+  } catch (e) {
+    // Corrupt/unreadable saved state -- fall through to a normal sign-in.
+  }
+
+  function persistIdentity() {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(esriId.toJSON()));
+    } catch (e) {
+      // localStorage unavailable (private browsing, quota, etc.) --
+      // sign-in still works, it just won't survive a reload.
+    }
+  }
+
   var oauthInfo = new OAuthInfo({
     appId: CONFIG.clientId,
     portalUrl: CONFIG.portalUrl,
@@ -179,11 +209,17 @@ require([
   esriId.registerOAuthInfos([oauthInfo]);
 
   esriId.checkSignInStatus(CONFIG.portalUrl + "/sharing")
-    .then(onSignedIn)
+    .then(function () {
+      persistIdentity();
+      onSignedIn();
+    })
     .catch(function () {
       setStatus("Sign-in required to view this chart.");
       esriId.getCredential(CONFIG.portalUrl + "/sharing")
-        .then(onSignedIn)
+        .then(function () {
+          persistIdentity();
+          onSignedIn();
+        })
         .catch(function (err) {
           setStatus("Sign-in failed: " + (err && err.message ? err.message : err), true);
         });
@@ -396,7 +432,7 @@ require([
 
     function addTickLabel(x, y, text) {
       addEl("text", {
-        x: x, y: y, "font-size": 12, fill: "#333",
+        x: x, y: y, dx: -4, dy: 3, "font-size": 12, fill: "#333",
         "text-anchor": "end",
         transform: "rotate(-45 " + x + " " + y + ")"
       }, text);
