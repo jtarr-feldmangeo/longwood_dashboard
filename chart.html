@@ -20,6 +20,20 @@
   get just Delta Elevation; horiz+vert stations get Delta Elevation,
   Delta Northing, and Delta Easting as separate lines in the same chart.
 
+  X-AXIS SPACING IS ORDINAL, NOT TIME-PROPORTIONAL
+  ---------------------------------------------------
+  Reading dates are evenly spaced based on their rank among EVERY distinct
+  ReadingDate that exists anywhere in the readings table (queried fresh
+  each load from CONFIG.readingsTableUrl) -- not proportional to actual
+  elapsed calendar time, and not just the dates this one station happens
+  to have. If there are 6 possible reading rounds total, the 1st is
+  plotted at 1/6 across the axis, the 2nd at 2/6, etc., regardless of how
+  many calendar days apart they actually were. A station missing a given
+  round's reading simply has no point/line segment at that slot -- no
+  interpolation, no rescaling of the other points. This keeps the same
+  x-position meaning the same real-world reading round across every
+  station's chart.
+
   HOW THIS AUTHENTICATES
   -----------------------
   This page signs the VIEWER in with their own ArcGIS account (OAuth 2.0,
@@ -29,6 +43,11 @@
   specific group containing only the people who should see this data.
   No token or secret is ever hardcoded in this file.
 
+  Sign-in is persisted to localStorage (see STORAGE_KEY below) so that
+  selecting a different point -- which reloads this page, since the
+  Embed widget's URL changes -- doesn't re-prompt for login every time.
+  You'll still see one popup the first time ever.
+
   REQUIRED SETUP -- fill in the CONFIG block below before hosting this:
   -----------------------------------------------------------------------
   1. Register an OAuth 2.0 application (ArcGIS Online: My Content > New
@@ -36,10 +55,10 @@
      wherever you host oauth-callback.html (same folder as this file),
      and copy its Client ID into CONFIG.clientId below.
 
-  2. Find the merged layer's URL and relationship ID: open
-     {serviceUrl}/{layerIndex}?f=pjson in a browser (with a valid token
-     or via a session-carried click-through) and look at the
-     "relationships" array.
+  2. Find the merged layer's URL and relationship ID, AND the readings
+     table's own URL: open {serviceUrl}/{layerIndex}?f=pjson in a browser
+     and look at the "relationships" array for the relationshipId and the
+     related table's index (readingsTableUrl = same service, that index).
 
   3. Update CONFIG.seriesRules if your station naming scheme ever changes
      or grows new prefixes.
@@ -116,6 +135,12 @@ require([
     pointsLayerUrl: "https://services3.arcgis.com/W9pAkEJR9WoiNAM1/arcgis/rest/services/DMP_2600389/FeatureServer/0",
     relationshipId: 0,
 
+    // The readings table itself (same service, sibling layer index --
+    // confirmed as index 1 from the REST directory's "Tables: DefmonReadings (1)").
+    // Needed separately from pointsLayerUrl to query the full set of
+    // distinct reading dates across ALL stations, for the ordinal x-axis.
+    readingsTableUrl: "https://services3.arcgis.com/W9pAkEJR9WoiNAM1/arcgis/rest/services/DMP_2600389/FeatureServer/1",
+
     // Which delta fields to plot as separate lines, chosen by matching
     // the station's prefix. First matching rule wins; order matters if
     // prefixes could ever overlap (they don't currently). Labels use
@@ -169,6 +194,12 @@ require([
     return null;
   }
 
+  function sameDay(d1, d2) {
+    return d1.getFullYear() === d2.getFullYear() &&
+           d1.getMonth() === d2.getMonth() &&
+           d1.getDate() === d2.getDate();
+  }
+
   // ---- 1. Sign in ----
   //
   // Selecting a different point on the map changes the Embed widget's URL
@@ -214,7 +245,7 @@ require([
       onSignedIn();
     })
     .catch(function () {
-      setStatus("Sign-in required to view this chart.");
+      setStatus("Sign in with your ArcGIS account to view this deformation chart.");
       esriId.getCredential(CONFIG.portalUrl + "/sharing")
         .then(function () {
           persistIdentity();
@@ -243,10 +274,34 @@ require([
     loadReadings(station, series);
   }
 
-  // ---- 2. Look up the point's OBJECTID, then its related readings ----
+  // ---- 2. Look up the point's OBJECTID, its related readings, AND the
+  //         full set of distinct reading dates across the whole table ----
+  function fetchAllDistinctDates() {
+    return esriRequest(CONFIG.readingsTableUrl + "/query", {
+      query: {
+        where: "1=1",
+        outFields: CONFIG.readingDateField,
+        returnDistinctValues: true,
+        orderByFields: CONFIG.readingDateField + " ASC",
+        f: "json"
+      },
+      responseType: "json"
+    }).then(function (response) {
+      var features = (response.data && response.data.features) || [];
+      return features
+        .map(function (f) { return new Date(f.attributes[CONFIG.readingDateField]); })
+        .filter(function (d) { return !isNaN(d.getTime()); });
+    }).catch(function () {
+      // If this fails for any reason, fall back to an empty list --
+      // drawChart() falls back to just this station's own dates.
+      return [];
+    });
+  }
+
   function loadReadings(station, series) {
     var whereClause = CONFIG.stationField + " = '" + station.replace(/'/g, "''") + "'";
     var seriesFields = series.map(function (s) { return s.field; });
+    var stationReadings = null;
 
     esriRequest(CONFIG.pointsLayerUrl + "/query", {
       query: {
@@ -259,7 +314,7 @@ require([
       var features = response.data && response.data.features;
       if (!features || features.length === 0) {
         setStatus("No point found for station '" + station + "'.", true);
-        return;
+        return null;
       }
       var objectId = features[0].attributes.OBJECTID;
 
@@ -274,7 +329,7 @@ require([
         responseType: "json"
       });
     }).then(function (response) {
-      if (!response) { return; }
+      if (!response) { return null; }
       var groups = response.data && response.data.relatedRecordGroups;
       var readings = [];
       if (groups && groups.length > 0 && groups[0].relatedRecords) {
@@ -289,15 +344,24 @@ require([
           };
         });
       }
+      stationReadings = readings;
+      return fetchAllDistinctDates();
+    }).then(function (allDates) {
+      if (stationReadings === null) { return; }
+      // Fallback: if the global date fetch failed/returned nothing, use
+      // just this station's own dates (equivalent to the old behavior).
+      if (!allDates || allDates.length === 0) {
+        allDates = stationReadings.map(function (r) { return r.date; });
+      }
       setStatus("");
-      drawChart(readings, series, station);
+      drawChart(stationReadings, series, station, allDates);
     }).catch(function (err) {
       setStatus("Error loading data: " + (err && err.message ? err.message : err), true);
     });
   }
 
   // ---- 3. Draw the chart as real, interactive SVG -- one line per series ----
-  function drawChart(readings, seriesList, station) {
+  function drawChart(readings, seriesList, station, allDates) {
     var W = containerEl.clientWidth || 1400;
     var H = 260;
     var padL = 55, padR = 20, padT = 34, padB = 45;
@@ -305,22 +369,25 @@ require([
     var baselineGap = 50;
 
     var n = readings.length;
+    var totalSlots = Math.max(1, allDates.length);
     var plotW = W - padL - padR;
     var plotH = H - padT - padB;
     var axisY = H - padB;
     var baselineX = padL;
     var datesPlotW = plotW - baselineGap;
 
-    var firstDate = n > 0 ? readings[0].date : null;
-    var lastDate = n > 0 ? readings[n - 1].date : null;
-    var dateRangeMs = (firstDate && lastDate) ? (lastDate - firstDate) : 0;
-
-    function xForIndex(i) {
-      if (dateRangeMs === 0) {
-        return padL + baselineGap + (n === 1 ? datesPlotW / 2 : datesPlotW * i / (n - 1));
+    // Ordinal position: each reading's x is based on its RANK among every
+    // distinct reading date that exists anywhere in the table, not on
+    // actual elapsed time and not on how many readings THIS station has.
+    // 1st possible date -> 1/totalSlots across, 2nd -> 2/totalSlots, etc.
+    function globalSlotIndex(date) {
+      for (var i = 0; i < allDates.length; i++) {
+        if (sameDay(allDates[i], date)) { return i; }
       }
-      var offsetMs = readings[i].date - firstDate;
-      return padL + baselineGap + datesPlotW * offsetMs / dateRangeMs;
+      return -1; // shouldn't happen if allDates truly is the full set
+    }
+    function xForSlot(slotIndex) {
+      return padL + baselineGap + datesPlotW * (slotIndex + 1) / totalSlots;
     }
     function yForValue(v) {
       return padT + plotH * (yMax - v) / (yMax - yMin);
@@ -337,6 +404,14 @@ require([
     function fmtDate(d) {
       return (d.getMonth() + 1) + "/" + d.getDate() + "/" + String(d.getFullYear()).slice(-2);
     }
+
+    // Precompute each reading's x position once (its slot among all
+    // possible dates); skip any reading whose date isn't found in
+    // allDates (shouldn't happen, but fail safe rather than mis-plot).
+    var plotX = readings.map(function (r) {
+      var slot = globalSlotIndex(r.date);
+      return slot === -1 ? null : xForSlot(slot);
+    });
 
     var svgNS = "http://www.w3.org/2000/svg";
     var svg = document.createElementNS(svgNS, "svg");
@@ -381,36 +456,53 @@ require([
     var baselineY = yForValue(0);
     var tickBottom = axisY + 10;
 
-    // Precompute one combined, stacked tooltip per date index -- every
-    // series' value for that date, so hovering near ANY of them (even if
-    // multiple series' points visually coincide) shows all of them, not
-    // just whichever series happened to be drawn on top.
-    var combinedTooltips = [];
+    // Precompute, per reading, a tooltip PER SERIES -- series that share
+    // the exact same value at that reading (visually coincide on the
+    // chart) get stacked together into one tooltip; a series with a
+    // value unique to itself at that reading gets its own solo tooltip.
+    var tooltipsByIndex = [];
     for (var idx = 0; idx < n; idx++) {
-      var lines = [fmtDate(readings[idx].date)];
+      var valueGroups = {};
       seriesList.forEach(function (s) {
         var rv = readings[idx].values[s.field];
-        lines.push(s.label + ": " + (rv === null || rv === undefined ? "n/a" : fmt2(rv) + " ft"));
+        var key = (rv === null || rv === undefined) ? "null" : fmt2(rv);
+        if (!valueGroups[key]) { valueGroups[key] = []; }
+        valueGroups[key].push(s);
       });
-      combinedTooltips.push(lines.join("\n"));
+      var perField = {};
+      seriesList.forEach(function (s) {
+        var rv = readings[idx].values[s.field];
+        var key = (rv === null || rv === undefined) ? "null" : fmt2(rv);
+        var group = valueGroups[key];
+        var lines = [fmtDate(readings[idx].date)];
+        group.forEach(function (gs) {
+          var grv = readings[idx].values[gs.field];
+          lines.push(gs.label + ": " + (grv === null || grv === undefined ? "n/a" : fmt2(grv) + " ft"));
+        });
+        perField[s.field] = lines.join("\n");
+      });
+      tooltipsByIndex.push(perField);
     }
 
-    // One line + set of points per series, all sharing the same baseline origin
+    // One line + set of points per series, all sharing the same baseline
+    // origin. Readings whose date wasn't found in allDates (plotX ===
+    // null) are skipped entirely -- no interpolation across the gap.
     seriesList.forEach(function (s) {
       var pointsStr = baselineX + "," + baselineY + " ";
       for (var i = 0; i < n; i++) {
+        if (plotX[i] === null) { continue; }
         var v = clamp(readings[i].values[s.field]);
-        pointsStr += xForIndex(i) + "," + yForValue(v) + " ";
+        pointsStr += plotX[i] + "," + yForValue(v) + " ";
       }
       addEl("polyline", { points: pointsStr, fill: "none", stroke: s.color, "stroke-width": 2 });
 
       for (var j = 0; j < n; j++) {
+        if (plotX[j] === null) { continue; }
         var rawValue = readings[j].values[s.field];
         var cv = clamp(rawValue);
-        var cx = xForIndex(j);
         var cy = yForValue(cv);
 
-        addPointWithTooltip(cx, cy, combinedTooltips[j], rawValue, s.color);
+        addPointWithTooltip(plotX[j], cy, tooltipsByIndex[j][s.field], rawValue, s.color);
       }
     });
 
@@ -419,20 +511,25 @@ require([
     addEl("line", { x1: baselineX, y1: axisY, x2: baselineX, y2: tickBottom, stroke: "#666" });
     addTickLabel(baselineX, tickBottom, "Baseline");
 
-    // X-axis date tick labels (thinned if dense) -- independent of series count
+    // X-axis date tick labels for this station's actual readings
+    // (thinned if dense), positioned at their ordinal slot.
+    var presentCount = plotX.filter(function (x) { return x !== null; }).length;
     var maxLabels = Math.max(1, Math.floor(datesPlotW / 35));
-    var labelInterval = Math.max(1, Math.ceil(n / maxLabels));
+    var labelInterval = Math.max(1, Math.ceil(presentCount / maxLabels));
+    var seen = 0;
     for (var k = 0; k < n; k++) {
-      if (k % labelInterval === 0 || k === n - 1) {
-        var tx = xForIndex(k);
-        addEl("line", { x1: tx, y1: axisY, x2: tx, y2: tickBottom, stroke: "#666" });
-        addTickLabel(tx, tickBottom, fmtDate(readings[k].date));
+      if (plotX[k] === null) { continue; }
+      var isLastPresent = (k === n - 1) || plotX.slice(k + 1).every(function (x) { return x === null; });
+      if (seen % labelInterval === 0 || isLastPresent) {
+        addEl("line", { x1: plotX[k], y1: axisY, x2: plotX[k], y2: tickBottom, stroke: "#666" });
+        addTickLabel(plotX[k], tickBottom, fmtDate(readings[k].date));
       }
+      seen++;
     }
 
     function addTickLabel(x, y, text) {
       addEl("text", {
-        x: x, y: y, dx: -4, dy: 3, "font-size": 12, fill: "#333",
+        x: x, y: y, dx: -2, dy: 5, "font-size": 12, fill: "#333",
         "text-anchor": "end",
         transform: "rotate(-45 " + x + " " + y + ")"
       }, text);
