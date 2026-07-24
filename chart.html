@@ -84,7 +84,7 @@
   #status.error { color: #b00020; }
   #chart-container {
     width: 100%;
-    padding-bottom: 14px;
+    padding-bottom: 18px;
   }
   svg { display: block; }
 
@@ -512,20 +512,18 @@ require([
     addEl("line", { x1: baselineX, y1: axisY, x2: baselineX, y2: tickBottom, stroke: "#666" });
     addTickLabel(baselineX, tickBottom, "Baseline");
 
-    // X-axis date tick labels for this station's actual readings
-    // (thinned if dense), positioned at their ordinal slot.
-    var presentCount = plotX.filter(function (x) { return x !== null; }).length;
+    // X-axis date tick labels for EVERY possible reading date (thinned if
+    // dense), not just the ones this station happens to have data for --
+    // the axis always shows the full reading timeline, so dates with no
+    // reading for this point still get a labeled tick.
     var maxLabels = Math.max(1, Math.floor(datesPlotW / 35));
-    var labelInterval = Math.max(1, Math.ceil(presentCount / maxLabels));
-    var seen = 0;
-    for (var k = 0; k < n; k++) {
-      if (plotX[k] === null) { continue; }
-      var isLastPresent = (k === n - 1) || plotX.slice(k + 1).every(function (x) { return x === null; });
-      if (seen % labelInterval === 0 || isLastPresent) {
-        addEl("line", { x1: plotX[k], y1: axisY, x2: plotX[k], y2: tickBottom, stroke: "#666" });
-        addTickLabel(plotX[k], tickBottom, fmtDate(readings[k].date));
+    var labelInterval = Math.max(1, Math.ceil(allDates.length / maxLabels));
+    for (var k = 0; k < allDates.length; k++) {
+      var tx = xForSlot(k);
+      if (k % labelInterval === 0 || k === allDates.length - 1) {
+        addEl("line", { x1: tx, y1: axisY, x2: tx, y2: tickBottom, stroke: "#666" });
+        addTickLabel(tx, tickBottom, fmtDate(allDates[k]));
       }
-      seen++;
     }
 
     function addTickLabel(x, y, text) {
