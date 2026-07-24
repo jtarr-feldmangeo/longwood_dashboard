@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Deformation Chart</title>
+
+<!--
+  =========================================================================
+  DEFMON PER-POINT CHART -- for use inside an Experience Builder Embed
+  widget, with the URL driven by the widget's "Connect to data" dynamic
+  URL feature (Station attribute -> ?station={Station}).
+
+  HOW THIS AUTHENTICATES
+  -----------------------
+  This page signs the VIEWER in with their own ArcGIS account (OAuth 2.0,
+  handled by the ArcGIS Maps SDK's IdentityManager) and uses their token
+  to query the feature service directly. Access is controlled by however
+  you've shared the "Vertical Deformation Monitoring Points" layer and its
+  related VerticalReadings table in ArcGIS -- e.g. share them with a
+  specific group containing only the people who should see this data.
+  No token or secret is ever hardcoded in this file.
+
+  REQUIRED SETUP -- fill in the CONFIG block below before hosting this:
+  -----------------------------------------------------------------------
+  1. Register an OAuth 2.0 application:
+       - ArcGIS Online: My Content > New item > Application > choose
+         "Other application" (browser-based).
+       - Or via developers.arcgis.com > your account > API keys/OAuth.
+       - Set its redirect URI to the exact URL you will host this file
+         at (e.g. https://yourorg.github.io/defmon/chart.html).
+       - Copy its Client ID into CONFIG.clientId below.
+
+  2. Find your feature service's layer URL and relationship ID:
+       - Open your hosted feature layer item in ArcGIS Online.
+       - Click "View" > "API Reference" (or just append /FeatureServer to
+         the item's service URL) to get the base service URL.
+       - Open {serviceUrl}/0 (or whichever index is your points layer) in
+         a browser (append ?f=json) and look at the "relationships" array
+         to find the relationshipId for the "Readings" relate and which
+         index the related table is at ({serviceUrl}/1, /2, etc).
+
+  3. Fill in CONFIG.portalUrl if you're on ArcGIS Enterprise instead of
+     ArcGIS Online (default assumes arcgis.com).
+  =========================================================================
+-->
+
+<script src="https://js.arcgis.com/4.30/"></script>
+<link rel="stylesheet" href="https://js.arcgis.com/4.30/esri/themes/light/main.css" />
+
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    font-family: 'Avenir Next', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    background: #ffffff;
+  }
+  #status {
+    padding: 12px;
+    font-size: 13px;
+    color: #555;
+  }
+  #status.error { color: #b00020; }
+  #chart-container {
+    width: 100%;
+  }
+  svg { display: block; }
+
+  /* Custom hover tooltip -- real DOM, real interactivity */
+  #tooltip {
+    position: fixed;
+    pointer-events: none;
+    background: #2b2b2b;
+    color: #fff;
+    font-size: 12px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    display: none;
+    white-space: nowrap;
+    z-index: 1000;
+  }
+  .chart-point { cursor: pointer; }
+</style>
+</head>
+<body>
+
+<div id="status">Loading&hellip;</div>
+<div id="chart-container"></div>
+<div id="tooltip"></div>
+
+<script>
+require([
+  "esri/identity/IdentityManager",
+  "esri/identity/OAuthInfo",
+  "esri/request"
+], function (esriId, OAuthInfo, esriRequest) {
+
+  // =======================================================================
+  // CONFIG -- fill these in for your organization
+  // =======================================================================
+  var CONFIG = {
+    clientId: "YOUR_OAUTH_CLIENT_ID",
+    portalUrl: "https://www.arcgis.com",              // ArcGIS Enterprise: "https://yourportal.domain.com/portal"
+    pointsLayerUrl: "https://services.arcgis.com/XXXX/arcgis/rest/services/YOUR_SERVICE/FeatureServer/0",
+    relationshipId: 0,                                  // from the layer's JSON "relationships" array
+    stationField: "Station",
+    readingDateField: "ReadingDate",
+    deltaField: "DeltaElevation",                        // swap for DeltaNorthing/DeltaEasting on HV points
+    yMin: -0.05,
+    yMax: 0.05
+  };
+  // =======================================================================
+
+  var statusEl = document.getElementById("status");
+  var containerEl = document.getElementById("chart-container");
+  var tooltipEl = document.getElementById("tooltip");
+
+  function setStatus(msg, isError) {
+    statusEl.textContent = msg;
+    statusEl.className = isError ? "error" : "";
+    statusEl.style.display = msg ? "block" : "none";
+  }
+
+  function getStationParam() {
+    var params = new URLSearchParams(window.location.search);
+    return params.get("station");
+  }
+
+  // ---- 1. Sign in ----
+  var oauthInfo = new OAuthInfo({
+    appId: CONFIG.clientId,
+    portalUrl: CONFIG.portalUrl,
+    popup: true,          // popup keeps the parent Experience Builder page intact
+    flowType: "auto"       // uses PKCE auth-code flow where supported
+  });
+  esriId.registerOAuthInfos([oauthInfo]);
+
+  esriId.checkSignInStatus(CONFIG.portalUrl + "/sharing")
+    .then(onSignedIn)
+    .catch(function () {
+      setStatus("Sign-in required to view this chart.");
+      esriId.getCredential(CONFIG.portalUrl + "/sharing")
+        .then(onSignedIn)
+        .catch(function (err) {
+          setStatus("Sign-in failed: " + (err && err.message ? err.message : err), true);
+        });
+    });
+
+  function onSignedIn() {
+    var station = getStationParam();
+    if (!station) {
+      setStatus("No point selected. Select a point on the map to view its chart.");
+      return;
+    }
+    setStatus("Loading readings for " + station + "\u2026");
+    loadReadings(station);
+  }
+
+  // ---- 2. Look up the point's OBJECTID, then its related readings ----
+  function loadReadings(station) {
+    var whereClause = CONFIG.stationField + " = '" + station.replace(/'/g, "''") + "'";
+
+    esriRequest(CONFIG.pointsLayerUrl + "/query", {
+      query: {
+        where: whereClause,
+        outFields: "OBJECTID",
+        f: "json"
+      },
+      responseType: "json"
+    }).then(function (response) {
+      var features = response.data && response.data.features;
+      if (!features || features.length === 0) {
+        setStatus("No point found for station '" + station + "'.", true);
+        return;
+      }
+      var objectId = features[0].attributes.OBJECTID;
+
+      return esriRequest(CONFIG.pointsLayerUrl + "/queryRelatedRecords", {
+        query: {
+          objectIds: objectId,
+          relationshipId: CONFIG.relationshipId,
+          outFields: [CONFIG.readingDateField, CONFIG.deltaField].join(","),
+          orderByFields: CONFIG.readingDateField + " ASC",
+          f: "json"
+        },
+        responseType: "json"
+      });
+    }).then(function (response) {
+      if (!response) { return; }
+      var groups = response.data && response.data.relatedRecordGroups;
+      var readings = [];
+      if (groups && groups.length > 0 && groups[0].relatedRecords) {
+        readings = groups[0].relatedRecords.map(function (rec) {
+          return {
+            date: new Date(rec.attributes[CONFIG.readingDateField]),
+            value: rec.attributes[CONFIG.deltaField]
+          };
+        });
+      }
+      setStatus("");
+      drawChart(readings);
+    }).catch(function (err) {
+      setStatus("Error loading data: " + (err && err.message ? err.message : err), true);
+    });
+  }
+
+  // ---- 3. Draw the chart as real, interactive SVG ----
+  function drawChart(readings) {
+    var W = containerEl.clientWidth || 1400;
+    var H = 260;
+    var padL = 55, padR = 20, padT = 16, padB = 45;
+    var yMin = CONFIG.yMin, yMax = CONFIG.yMax;
+    var baselineGap = 50;
+
+    // Clamp outliers to the fixed axis
+    readings = readings.map(function (r) {
+      var v = r.value;
+      if (v === null || v === undefined) { v = 0; }
+      if (v < yMin) { v = yMin; }
+      if (v > yMax) { v = yMax; }
+      return { date: r.date, value: v, rawValue: r.value };
+    });
+
+    var n = readings.length;
+    var plotW = W - padL - padR;
+    var plotH = H - padT - padB;
+    var axisY = H - padB;
+    var baselineX = padL;
+    var datesPlotW = plotW - baselineGap;
+
+    var firstDate = n > 0 ? readings[0].date : null;
+    var lastDate = n > 0 ? readings[n - 1].date : null;
+    var dateRangeMs = (firstDate && lastDate) ? (lastDate - firstDate) : 0;
+
+    function xForIndex(i) {
+      if (dateRangeMs === 0) {
+        return padL + baselineGap + (n === 1 ? datesPlotW / 2 : datesPlotW * i / (n - 1));
+      }
+      var offsetMs = readings[i].date - firstDate;
+      return padL + baselineGap + datesPlotW * offsetMs / dateRangeMs;
+    }
+    function yForValue(v) {
+      return padT + plotH * (yMax - v) / (yMax - yMin);
+    }
+    function fmt2(v) {
+      return (Math.round(v * 100) / 100).toFixed(2);
+    }
+    function fmtDate(d) {
+      return (d.getMonth() + 1) + "/" + d.getDate() + "/" + String(d.getFullYear()).slice(-2);
+    }
+
+    var svgNS = "http://www.w3.org/2000/svg";
+    var svg = document.createElementNS(svgNS, "svg");
+    svg.setAttribute("width", W);
+    svg.setAttribute("height", H);
+    svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+
+    function addEl(tag, attrs, text) {
+      var el = document.createElementNS(svgNS, tag);
+      for (var k in attrs) { el.setAttribute(k, attrs[k]); }
+      if (text !== undefined) { el.textContent = text; }
+      svg.appendChild(el);
+      return el;
+    }
+
+    addEl("rect", { x: 0, y: 0, width: W, height: H, fill: "#ffffff" });
+
+    // Dashed gridlines every 0.01, baseline (0) solid + labeled
+    var step = 0.01;
+    for (var gv = yMin; gv <= yMax + 0.0001; gv += step) {
+      var gy = yForValue(gv);
+      var isBaseline = Math.abs(gv) < 0.0001;
+      if (isBaseline) {
+        addEl("line", { x1: padL, y1: gy, x2: W - padR, y2: gy, stroke: "#999", "stroke-width": 1 });
+        addEl("text", { x: 4, y: gy + 4, "font-size": 11, fill: "#333" }, "Baseline");
+      } else {
+        addEl("line", { x1: padL, y1: gy, x2: W - padR, y2: gy, stroke: "#ddd", "stroke-width": 1, "stroke-dasharray": "3,3" });
+        if (Math.abs(gv - yMin) < 0.0001 || Math.abs(gv - yMax) < 0.0001) {
+          addEl("text", { x: 4, y: gy + 4, "font-size": 11, fill: "#333" }, fmt2(gv));
+        }
+      }
+    }
+
+    // Axes
+    addEl("line", { x1: padL, y1: padT, x2: padL, y2: axisY, stroke: "#333" });
+    addEl("line", { x1: padL, y1: axisY, x2: W - padR, y2: axisY, stroke: "#333" });
+
+    // Data line (baseline start -> each reading)
+    var baselineY = yForValue(0);
+    var pointsStr = baselineX + "," + baselineY + " ";
+    for (var i = 0; i < n; i++) {
+      pointsStr += xForIndex(i) + "," + yForValue(readings[i].value) + " ";
+    }
+    addEl("polyline", { points: pointsStr, fill: "none", stroke: "#1a73e8", "stroke-width": 2 });
+
+    // Baseline point + tick/label
+    var tickBottom = axisY + 10;
+    addPointWithTooltip(baselineX, baselineY, "Baseline", null);
+    addEl("line", { x1: baselineX, y1: axisY, x2: baselineX, y2: tickBottom, stroke: "#666" });
+    addTickLabel(baselineX, tickBottom, "Baseline");
+
+    // Reading points + tick labels (thinned if dense)
+    var maxLabels = Math.max(1, Math.floor(datesPlotW / 35));
+    var labelInterval = Math.max(1, Math.ceil(n / maxLabels));
+
+    for (var j = 0; j < n; j++) {
+      var cx = xForIndex(j);
+      var cy = yForValue(readings[j].value);
+      var dateLabel = fmtDate(readings[j].date);
+      var tooltipText = dateLabel + ": " + fmt2(readings[j].rawValue) + " ft";
+
+      addPointWithTooltip(cx, cy, tooltipText, readings[j].rawValue);
+
+      if (j % labelInterval === 0 || j === n - 1) {
+        addEl("line", { x1: cx, y1: axisY, x2: cx, y2: tickBottom, stroke: "#666" });
+        addTickLabel(cx, tickBottom, dateLabel);
+      }
+    }
+
+    function addTickLabel(x, y, text) {
+      addEl("text", {
+        x: x, y: y, "font-size": 9, fill: "#333",
+        "text-anchor": "end",
+        transform: "rotate(-45 " + x + " " + y + ")"
+      }, text);
+    }
+
+    function addPointWithTooltip(cx, cy, tooltipText, rawValue) {
+      var g = document.createElementNS(svgNS, "g");
+      g.setAttribute("class", "chart-point");
+
+      var dot = document.createElementNS(svgNS, "circle");
+      dot.setAttribute("cx", cx);
+      dot.setAttribute("cy", cy);
+      dot.setAttribute("r", 3);
+      dot.setAttribute("fill", rawValue !== null && (rawValue < yMin || rawValue > yMax) ? "#d93025" : "#1a73e8");
+      g.appendChild(dot);
+
+      // Bigger invisible hit target -- easier to hover than a 3px dot
+      var hit = document.createElementNS(svgNS, "circle");
+      hit.setAttribute("cx", cx);
+      hit.setAttribute("cy", cy);
+      hit.setAttribute("r", 8);
+      hit.setAttribute("fill", "transparent");
+      g.appendChild(hit);
+
+      g.addEventListener("mouseenter", function (evt) {
+        tooltipEl.textContent = tooltipText;
+        tooltipEl.style.display = "block";
+        positionTooltip(evt);
+      });
+      g.addEventListener("mousemove", positionTooltip);
+      g.addEventListener("mouseleave", function () {
+        tooltipEl.style.display = "none";
+      });
+
+      svg.appendChild(g);
+    }
+
+    function positionTooltip(evt) {
+      tooltipEl.style.left = (evt.clientX + 12) + "px";
+      tooltipEl.style.top = (evt.clientY - 24) + "px";
+    }
+
+    containerEl.innerHTML = "";
+    containerEl.appendChild(svg);
+  }
+
+});
+</script>
+</body>
+</html>
