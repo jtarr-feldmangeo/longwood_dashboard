@@ -17,10 +17,8 @@
   class / single hosted web layer, with a single related readings table.
   This page still auto-detects which SERIES to plot based on the
   station's prefix (see CONFIG.seriesRules below): vertical-only stations
-  get just Elevation Delta; horiz+vert stations get Elevation, Northing,
-  and Easting Delta as separate lines in the same chart. But there's only
-  ONE pointsLayerUrl / relationshipId to configure now -- one Embed
-  widget, connected to the one merged layer, covers every point.
+  get just Delta Elevation; horiz+vert stations get Delta Elevation,
+  Delta Northing, and Delta Easting as separate lines in the same chart.
 
   HOW THIS AUTHENTICATES
   -----------------------
@@ -59,9 +57,10 @@
     background: #ffffff;
   }
   #status {
-    padding: 12px;
-    font-size: 13px;
+    padding: 40px 12px;
+    font-size: 16px;
     color: #555;
+    text-align: center;
   }
   #status.error { color: #b00020; }
   #chart-container {
@@ -69,17 +68,20 @@
   }
   svg { display: block; }
 
-  /* Custom hover tooltip -- real DOM, real interactivity */
+  /* Custom hover tooltip -- real DOM, real interactivity. Multi-line
+     content (one line per series) is supported via pre-line so \n in
+     the tooltip text renders as real line breaks. */
   #tooltip {
     position: fixed;
     pointer-events: none;
     background: #2b2b2b;
     color: #fff;
     font-size: 12px;
-    padding: 4px 8px;
+    padding: 6px 10px;
     border-radius: 4px;
     display: none;
-    white-space: nowrap;
+    white-space: pre-line;
+    line-height: 1.5;
     z-index: 1000;
   }
   .chart-point { cursor: pointer; }
@@ -99,7 +101,7 @@ require([
 ], function (esriId, OAuthInfo, esriRequest) {
 
   // =======================================================================
-  // CONFIG -- fill these in for your organization
+  // CONFIG
   // =======================================================================
   var CONFIG = {
     clientId: "jgNbpPNmIzybM5HZ",
@@ -116,20 +118,22 @@ require([
 
     // Which delta fields to plot as separate lines, chosen by matching
     // the station's prefix. First matching rule wins; order matters if
-    // prefixes could ever overlap (they don't currently).
+    // prefixes could ever overlap (they don't currently). Labels use
+    // "Delta <direction>" phrasing (e.g. "Delta Easting"), not
+    // "<direction> Delta".
     seriesRules: [
       {
         prefixes: ["TMP-", "SWMP-"],
         series: [
-          { field: "DeltaElevation", label: "Elevation \u0394", color: "#1a73e8" },
-          { field: "DeltaNorthing", label: "Northing \u0394", color: "#d93025" },
-          { field: "DeltaEasting", label: "Easting \u0394", color: "#188038" }
+          { field: "DeltaElevation", label: "\u0394 Elevation", color: "#1a73e8" },
+          { field: "DeltaNorthing", label: "\u0394 Northing", color: "#d93025" },
+          { field: "DeltaEasting", label: "\u0394 Easting", color: "#188038" }
         ]
       },
       {
         prefixes: ["SMP-", "UMP-", "FMP-", "LC-"],
         series: [
-          { field: "DeltaElevation", label: "Elevation \u0394", color: "#1a73e8" }
+          { field: "DeltaElevation", label: "\u0394 Elevation", color: "#1a73e8" }
         ]
       }
     ]
@@ -188,7 +192,7 @@ require([
   function onSignedIn() {
     var station = getStationParam();
     if (!station) {
-      setStatus("No point selected. Select a point on the map to view its chart.");
+      setStatus("Select a monitoring point on the map to view its deformation data.");
       return;
     }
 
@@ -250,18 +254,17 @@ require([
         });
       }
       setStatus("");
-      drawChart(readings, series);
+      drawChart(readings, series, station);
     }).catch(function (err) {
       setStatus("Error loading data: " + (err && err.message ? err.message : err), true);
     });
   }
 
   // ---- 3. Draw the chart as real, interactive SVG -- one line per series ----
-  function drawChart(readings, seriesList) {
+  function drawChart(readings, seriesList, station) {
     var W = containerEl.clientWidth || 1400;
     var H = 260;
-    var legendH = seriesList.length > 1 ? 24 : 0;
-    var padL = 55, padR = 20, padT = 16 + legendH, padB = 45;
+    var padL = 55, padR = 20, padT = 34, padB = 45;
     var yMin = CONFIG.yMin, yMax = CONFIG.yMax;
     var baselineGap = 50;
 
@@ -315,15 +318,9 @@ require([
 
     addEl("rect", { x: 0, y: 0, width: W, height: H, fill: "#ffffff" });
 
-    // Legend (only shown when there's more than one series -- horiz+vert points)
-    if (seriesList.length > 1) {
-      var lx = padL;
-      seriesList.forEach(function (s) {
-        addEl("rect", { x: lx, y: 4, width: 10, height: 10, fill: s.color });
-        addEl("text", { x: lx + 14, y: 13, "font-size": 11, fill: "#333" }, s.label);
-        lx += 14 + (s.label.length * 6.5) + 18;
-      });
-    }
+    // Title -- top left, the selected station's name (e.g. "TMP-1"),
+    // slightly larger than the axis/tick labels.
+    addEl("text", { x: padL, y: 20, "font-size": 15, "font-weight": "600", fill: "#222" }, station);
 
     // Dashed gridlines every 0.01, baseline (0) solid + labeled
     var step = 0.01;
@@ -332,11 +329,11 @@ require([
       var isBaseline = Math.abs(gv) < 0.0001;
       if (isBaseline) {
         addEl("line", { x1: padL, y1: gy, x2: W - padR, y2: gy, stroke: "#999", "stroke-width": 1 });
-        addEl("text", { x: 4, y: gy + 4, "font-size": 11, fill: "#333" }, "Baseline");
+        addEl("text", { x: 4, y: gy + 4, "font-size": 12, fill: "#333" }, "Baseline");
       } else {
         addEl("line", { x1: padL, y1: gy, x2: W - padR, y2: gy, stroke: "#ddd", "stroke-width": 1, "stroke-dasharray": "3,3" });
         if (Math.abs(gv - yMin) < 0.0001 || Math.abs(gv - yMax) < 0.0001) {
-          addEl("text", { x: 4, y: gy + 4, "font-size": 11, fill: "#333" }, fmt2(gv));
+          addEl("text", { x: 4, y: gy + 4, "font-size": 12, fill: "#333" }, fmt2(gv));
         }
       }
     }
@@ -347,6 +344,20 @@ require([
 
     var baselineY = yForValue(0);
     var tickBottom = axisY + 10;
+
+    // Precompute one combined, stacked tooltip per date index -- every
+    // series' value for that date, so hovering near ANY of them (even if
+    // multiple series' points visually coincide) shows all of them, not
+    // just whichever series happened to be drawn on top.
+    var combinedTooltips = [];
+    for (var idx = 0; idx < n; idx++) {
+      var lines = [fmtDate(readings[idx].date)];
+      seriesList.forEach(function (s) {
+        var rv = readings[idx].values[s.field];
+        lines.push(s.label + ": " + (rv === null || rv === undefined ? "n/a" : fmt2(rv) + " ft"));
+      });
+      combinedTooltips.push(lines.join("\n"));
+    }
 
     // One line + set of points per series, all sharing the same baseline origin
     seriesList.forEach(function (s) {
@@ -362,11 +373,8 @@ require([
         var cv = clamp(rawValue);
         var cx = xForIndex(j);
         var cy = yForValue(cv);
-        var dateLabel = fmtDate(readings[j].date);
-        var tooltipText = s.label + " -- " + dateLabel + ": " +
-          (rawValue === null || rawValue === undefined ? "n/a" : fmt2(rawValue) + " ft");
 
-        addPointWithTooltip(cx, cy, tooltipText, rawValue, s.color);
+        addPointWithTooltip(cx, cy, combinedTooltips[j], rawValue, s.color);
       }
     });
 
@@ -388,7 +396,7 @@ require([
 
     function addTickLabel(x, y, text) {
       addEl("text", {
-        x: x, y: y, "font-size": 9, fill: "#333",
+        x: x, y: y, "font-size": 10, fill: "#333",
         "text-anchor": "end",
         transform: "rotate(-45 " + x + " " + y + ")"
       }, text);
