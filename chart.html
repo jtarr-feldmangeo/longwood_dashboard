@@ -549,19 +549,40 @@ require([
       labelCandidates.push({
         color: s.color,
         x: plotX[lastIdx],
-        y: yForValue(clamp(readings[lastIdx].values[s.field])),
+        lineY: yForValue(clamp(readings[lastIdx].values[s.field])),
         text: s.label
       });
     });
 
-    labelCandidates.sort(function (a, b) { return a.y - b.y; });
+    // Layout: every label must clear EVERY line's y-position (not just
+    // its own -- a label pushed down to avoid one line can easily land
+    // on top of a different one) as well as every other label, with at
+    // least minLabelGap between any two. Each label starts lifted above
+    // its own line, then iterates a few passes pushing down past
+    // whichever obstacle (line or label) it's still too close to.
     var minLabelGap = 12;
-    for (var lci = 1; lci < labelCandidates.length; lci++) {
-      var prevLc = labelCandidates[lci - 1];
-      var curLc = labelCandidates[lci];
-      if (curLc.y - prevLc.y < minLabelGap) {
-        curLc.y = prevLc.y + minLabelGap;
+    var lineObstacles = labelCandidates.map(function (lc) { return lc.lineY; });
+    labelCandidates.forEach(function (lc) { lc.y = lc.lineY - minLabelGap - 2; });
+    labelCandidates.sort(function (a, b) { return a.y - b.y; });
+
+    for (var pass = 0; pass < 4; pass++) {
+      var changedAny = false;
+      for (var lci = 0; lci < labelCandidates.length; lci++) {
+        var minAllowedY = -Infinity;
+        if (lci > 0) {
+          minAllowedY = Math.max(minAllowedY, labelCandidates[lci - 1].y + minLabelGap);
+        }
+        lineObstacles.forEach(function (oy) {
+          if (Math.abs(labelCandidates[lci].y - oy) < minLabelGap) {
+            minAllowedY = Math.max(minAllowedY, oy + minLabelGap);
+          }
+        });
+        if (labelCandidates[lci].y < minAllowedY) {
+          labelCandidates[lci].y = minAllowedY;
+          changedAny = true;
+        }
       }
+      if (!changedAny) { break; }
     }
 
     labelCandidates.forEach(function (lc) {
