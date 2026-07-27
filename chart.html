@@ -46,14 +46,19 @@
   Sign-in is persisted to localStorage (see STORAGE_KEY below) so that
   selecting a different point -- which reloads this page, since the
   Embed widget's URL changes -- doesn't re-prompt for login every time.
-  You'll still see one popup the first time ever.
+  You'll still see one sign-in every ~2 weeks (the default token
+  expiration) per browser.
 
   REQUIRED SETUP -- fill in the CONFIG block below before hosting this:
   -----------------------------------------------------------------------
   1. Register an OAuth 2.0 application (ArcGIS Online: My Content > New
-     item > Application > "Other application"), set its redirect URI to
-     wherever you host oauth-callback.html (same folder as this file),
-     and copy its Client ID into CONFIG.clientId below.
+     item > Application > "Other application"). Set its redirect URI to
+     THIS FILE'S OWN URL (e.g. https://yourorg.github.io/defmon/chart.html)
+     -- NOT oauth-callback.html. This page uses the redirect (non-popup)
+     OAuth flow, which returns directly to the page that triggered
+     sign-in rather than to a separate callback page; oauth-callback.html
+     is unused unless you switch popup back to true in the OAuthInfo
+     config below. Copy the app's Client ID into CONFIG.clientId below.
 
   2. Find the merged layer's URL and relationship ID, AND the readings
      table's own URL: open {serviceUrl}/{layerIndex}?f=pjson in a browser
@@ -196,9 +201,9 @@ require([
   }
 
   function sameDay(d1, d2) {
-    return d1.getFullYear() === d2.getFullYear() &&
-           d1.getMonth() === d2.getMonth() &&
-           d1.getDate() === d2.getDate();
+    return d1.getUTCFullYear() === d2.getUTCFullYear() &&
+           d1.getUTCMonth() === d2.getUTCMonth() &&
+           d1.getUTCDate() === d2.getUTCDate();
   }
 
   // ---- 1. Sign in ----
@@ -235,7 +240,16 @@ require([
   var oauthInfo = new OAuthInfo({
     appId: CONFIG.clientId,
     portalUrl: CONFIG.portalUrl,
-    popup: true,          // popup keeps the parent Experience Builder page intact
+    // popup:false -- avoids the browser's "allow popup" permission gate
+    // that caused the sign-in-prompt-then-click-OK-then-popup friction.
+    // Instead, this navigates the iframe itself to ArcGIS's login page
+    // and back, no separate window involved. Requires the OAuth app's
+    // registered redirect URI to point at THIS page (chart.html) rather
+    // than oauth-callback.html -- that separate callback file is only
+    // needed for the popup flow. Combined with the localStorage
+    // persistence above, this should only ever be visible once every
+    // ~2 weeks (the default token expiration) per browser.
+    popup: false,
     flowType: "auto"       // uses PKCE auth-code flow where supported
   });
   esriId.registerOAuthInfos([oauthInfo]);
@@ -403,7 +417,7 @@ require([
       return (Math.round(v * 100) / 100).toFixed(2);
     }
     function fmtDate(d) {
-      return (d.getMonth() + 1) + "/" + d.getDate() + "/" + String(d.getFullYear()).slice(-2);
+      return (d.getUTCMonth() + 1) + "/" + d.getUTCDate() + "/" + String(d.getUTCFullYear()).slice(-2);
     }
 
     // Precompute each reading's x position once (its slot among all
