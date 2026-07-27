@@ -46,19 +46,17 @@
   Sign-in is persisted to localStorage (see STORAGE_KEY below) so that
   selecting a different point -- which reloads this page, since the
   Embed widget's URL changes -- doesn't re-prompt for login every time.
-  You'll still see one sign-in every ~2 weeks (the default token
+  You'll still see one sign-in popup every ~2 weeks (the default token
   expiration) per browser.
 
   REQUIRED SETUP -- fill in the CONFIG block below before hosting this:
   -----------------------------------------------------------------------
   1. Register an OAuth 2.0 application (ArcGIS Online: My Content > New
-     item > Application > "Other application"). Set its redirect URI to
-     THIS FILE'S OWN URL (e.g. https://yourorg.github.io/defmon/chart.html)
-     -- NOT oauth-callback.html. This page uses the redirect (non-popup)
-     OAuth flow, which returns directly to the page that triggered
-     sign-in rather than to a separate callback page; oauth-callback.html
-     is unused unless you switch popup back to true in the OAuthInfo
-     config below. Copy the app's Client ID into CONFIG.clientId below.
+     item > Application > "Other application"), set its redirect URI to
+     wherever you host oauth-callback.html (same folder as this file --
+     that separate file is required for the popup sign-in flow this page
+     uses; see the OAuthInfo comment below for why popup, not redirect),
+     and copy its Client ID into CONFIG.clientId below.
 
   2. Find the merged layer's URL and relationship ID, AND the readings
      table's own URL: open {serviceUrl}/{layerIndex}?f=pjson in a browser
@@ -240,16 +238,21 @@ require([
   var oauthInfo = new OAuthInfo({
     appId: CONFIG.clientId,
     portalUrl: CONFIG.portalUrl,
-    // popup:false -- avoids the browser's "allow popup" permission gate
-    // that caused the sign-in-prompt-then-click-OK-then-popup friction.
-    // Instead, this navigates the iframe itself to ArcGIS's login page
-    // and back, no separate window involved. Requires the OAuth app's
-    // registered redirect URI to point at THIS page (chart.html) rather
-    // than oauth-callback.html -- that separate callback file is only
-    // needed for the popup flow. Combined with the localStorage
-    // persistence above, this should only ever be visible once every
-    // ~2 weeks (the default token expiration) per browser.
-    popup: false,
+    // popup:true -- yes, this means a popup window and the extra
+    // click-through when a fresh sign-in is needed. That's a real but
+    // minor annoyance, and it's the tradeoff kept deliberately: the
+    // popup:false / redirect flow was tried and reverted because it
+    // breaks in Firefox by default (Enhanced Tracking Protection blocks
+    // the storage access an iframed OAuth redirect needs to complete --
+    // same failure mode documented for other apps' "sign in with
+    // redirect" flows, not fixable from this file) and did not work
+    // through Field Maps' embedded view either. Popup keeps the parent
+    // Experience Builder page intact and is the more broadly compatible
+    // choice across browsers/embedding contexts. Combined with the
+    // localStorage persistence above, this should still only be visible
+    // once every ~2 weeks (the default token expiration) per browser,
+    // not on every point selection.
+    popup: true,
     flowType: "auto"       // uses PKCE auth-code flow where supported
   });
   esriId.registerOAuthInfos([oauthInfo]);
