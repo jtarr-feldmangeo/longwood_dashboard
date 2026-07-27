@@ -458,7 +458,7 @@ require([
       var isBaseline = Math.abs(gv) < 0.0001;
       if (isBaseline) {
         addEl("line", { x1: padL, y1: gy, x2: W - padR, y2: gy, stroke: "#999", "stroke-width": 1 });
-        addEl("text", { x: 4, y: gy + 4, "font-size": 12, fill: "#333" }, "Baseline");
+        addEl("text", { x: 4, y: gy + 4, "font-size": 12, fill: "#333" }, "0.00");
       } else {
         addEl("line", { x1: padL, y1: gy, x2: W - padR, y2: gy, stroke: "#ddd", "stroke-width": 1, "stroke-dasharray": "3,3" });
         if (Math.abs(gv - yMin) < 0.0001 || Math.abs(gv - yMax) < 0.0001) {
@@ -522,6 +522,61 @@ require([
 
         addPointWithTooltip(plotX[j], cy, tooltipsByIndex[j][s.field], rawValue, s.color);
       }
+    });
+
+    // End-of-line series labels, color-coded to match each line -- takes
+    // the place of a legend. Placed at each series' LAST reading that
+    // actually has a value for that series (not just the last date
+    // overall, since one series can be null at a date where others have
+    // data). Two safeguards, since multiple series often end up very
+    // close together near baseline:
+    //   1. Vertically de-conflict: sort by y, push any label down that
+    //      would otherwise sit within minGap of the one above it.
+    //   2. Right-edge overflow: if there isn't room to the right of the
+    //      point for the label (estimated from character count), flip
+    //      it to sit to the LEFT of the point instead.
+    var labelCandidates = [];
+    seriesList.forEach(function (s) {
+      var lastIdx = -1;
+      for (var li2 = n - 1; li2 >= 0; li2--) {
+        var lv = readings[li2].values[s.field];
+        if (plotX[li2] !== null && lv !== null && lv !== undefined) {
+          lastIdx = li2;
+          break;
+        }
+      }
+      if (lastIdx === -1) { return; }
+      labelCandidates.push({
+        color: s.color,
+        x: plotX[lastIdx],
+        y: yForValue(clamp(readings[lastIdx].values[s.field])),
+        text: s.label
+      });
+    });
+
+    labelCandidates.sort(function (a, b) { return a.y - b.y; });
+    var minLabelGap = 12;
+    for (var lci = 1; lci < labelCandidates.length; lci++) {
+      var prevLc = labelCandidates[lci - 1];
+      var curLc = labelCandidates[lci];
+      if (curLc.y - prevLc.y < minLabelGap) {
+        curLc.y = prevLc.y + minLabelGap;
+      }
+    }
+
+    labelCandidates.forEach(function (lc) {
+      var approxCharWidth = 6.2;
+      var estWidth = lc.text.length * approxCharWidth;
+      var roomOnRight = (W - padR) - lc.x;
+      var flipLeft = roomOnRight < (estWidth + 8);
+
+      addEl("text", {
+        x: lc.x + (flipLeft ? -6 : 6),
+        y: lc.y + 4,
+        "font-size": 11,
+        fill: lc.color,
+        "text-anchor": flipLeft ? "end" : "start"
+      }, lc.text);
     });
 
     // Baseline point + tick/label (single, shared across all series)
